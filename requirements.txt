@@ -1,0 +1,16 @@
+Flask
+Flask-SQLAlchemy
+Flask-Cors
+Werkzeug
+requests
+openai
+pywebpush
+google-api-python-client
+google-auth
+google-auth-oauthlib
+reportlab
+qrcode[pil]
+cryptography
+pyotp
+gunicorn
+psycopg2-binary
