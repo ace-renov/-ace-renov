@@ -1556,7 +1556,35 @@ def public_health():
       "timestamp":datetime.datetime.utcnow().isoformat()
     }), 200 if db_ok else 503
 
+def permission_required(permission):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not _role_allowed(permission):
+                _security_event(
+                    "permission_denied",
+                    "high",
+                    "権限拒否",
+                    f"{permission} access denied"
+                )
+                return jsonify({
+                    "error": "forbidden",
+                    "permission": permission
+                }), 403
 
+            if permission in {
+                "finance", "payroll", "bank",
+                "security", "backup", "audit"
+            }:
+                if not _device_is_approved():
+                    return jsonify({
+                        "error": "device_approval_required"
+                    }), 403
+
+            return fn(*args, **kwargs)
+
+        return wrapper
+    return deco
 @app.get("/api/admin/deployment-summary")
 @auth_required("manager")
 @permission_required("audit")
