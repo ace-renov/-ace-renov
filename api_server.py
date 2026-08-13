@@ -3426,7 +3426,7 @@ def payment_sync():
 
 
 @app.post("/api/line/webhook")
-def line_webhook():
+def line_api_webhook():
     body=request.get_data(as_text=True)
     signature=request.headers.get("X-Line-Signature","")
     if LINE_CHANNEL_SECRET:
