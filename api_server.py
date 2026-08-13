@@ -1733,7 +1733,7 @@ def customer_portal_admin_summary():
     return jsonify({"portals":out,"requests":requests_out,"unreadNotices":unread})
 
 @app.post("/api/customer-portals/<token>/requests")
-def customer_portal_request_create(token):
+def customer_portal_customer_request_create(token):
     portal=CustomerPortal.query.filter_by(token=token,active=True).first()
     if not portal:return jsonify({"error":"not_found"}),404
     if not _portal_verified(portal):return jsonify({"error":"otp_required"}),401
