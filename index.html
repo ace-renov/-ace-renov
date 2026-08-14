@@ -2884,6 +2884,7 @@ async function uploadPhotoToServer(file,targetType,targetId,kind){
 
 
 const API_CONFIG_KEY="ace_api_config_v20";
+  let apiConfig={baseUrl:"https://web-production-c6ac8.up.railway.app",online:true,lastSync:null};
 
 function toggleSyncPanel(){
  document.getElementById("syncPanel").classList.toggle("hidden");
