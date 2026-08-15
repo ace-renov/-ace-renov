@@ -1019,10 +1019,10 @@ main{min-width:0}.top{position:sticky;top:0;background:rgba(245,246,248,.96);bac
   <div class="login-card">
     <h1>A<span class="c">C</span>E</h1>
     <p class="sub" style="margin:6px 0 16px">社内向け統合システム</p>
-    <div class="fg"><label>メールアドレス</label><input class="field" id="loginEmail" value="admin@ace.local"></div>
-    <div class="fg" style="margin-top:10px"><label>パスワード</label><input class="field" type="password" id="loginPassword" value="demo"></div>
+    <div class="fg"><label>メールアドレス</label><input class="field" id="loginEmail" autocomplete="username"></div>
+    <div class="fg" style="margin-top:10px"><label>パスワード</label><input class="field" type="password" id="loginPassword" autocomplete="current-password"></div>
     <button class="btn dark" style="width:100%;margin-top:14px" onclick="loginAce()">ログイン</button>
-    <div class="permission-note">デモ: admin@ace.local / demo</div><div class="token-note">API接続中はサーバー認証トークンを使用します。</div>
+    <div class="token-note">サーバー認証トークンでログインします。</div>
   </div>
 </div>
 
@@ -2625,67 +2625,78 @@ let apiToken=localStorage.getItem(API_TOKEN_KEY)||"";
 
 async function serverLogin(email,password){
   const base=(apiConfig?.baseUrl||"").replace(/\/$/,"");
-  if(!base)throw new Error("API URL未設定");
-  const res=await fetch(base+"/api/auth/login",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({email,password})
-  });
-  if(!res.ok)throw new Error("認証失敗");
+  if(!base)throw new Error("server_unreachable");
+  let res;
+  try{
+    res=await fetch(base+"/api/auth/login",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email,password})
+    });
+  }catch(e){
+    throw new Error("server_unreachable");
+  }
+  if(res.status===401)throw new Error("invalid_credentials");
+  if(!res.ok)throw new Error("server_unreachable");
   return await res.json();
 }
 function clearApiToken(){
   apiToken="";
   localStorage.removeItem(API_TOKEN_KEY);
 }
+function clearStoredAuth(){
+  clearApiToken();
+  localStorage.removeItem(AUTH_KEY);
+  currentUser=null;
+  document.getElementById("loginOverlay").classList.remove("hidden");
+}
 
 const AUTH_KEY="ace_auth_v18";
-let users=[
- {id:1,name:"ACE 管理者",email:"admin@ace.local",password:"demo",role:"admin"},
- {id:2,name:"現場マネージャー",email:"manager@ace.local",password:"demo",role:"manager"},
- {id:3,name:"施工スタッフ",email:"staff@ace.local",password:"demo",role:"staff"},
- {id:4,name:"閲覧ユーザー",email:"viewer@ace.local",password:"demo",role:"viewer"}
-];
+let users=[];
 let currentUser=null;
 
 const roleLabels={admin:"管理者",manager:"マネージャー",staff:"スタッフ",viewer:"閲覧"};
 async function loginAce(){
- const email=document.getElementById("loginEmail").value.trim().toLowerCase();
- const pass=document.getElementById("loginPassword").value;
- // If API is online, authenticate against the server first.
- if(apiConfig?.online){
-   try{
-     const data=await serverLogin(email,pass);
-     apiToken=data.token;
-     localStorage.setItem(API_TOKEN_KEY,apiToken);
-     currentUser={id:data.user.id,name:data.user.name,email:data.user.email,role:data.user.role};
-     localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
-     applyPermissions();
-     document.getElementById("loginOverlay").classList.add("hidden");
-     return;
-   }catch(e){
-     alert("サーバーログインに失敗しました。");
-     return;
-   }
- }
- // Offline demo login fallback
- const u=users.find(x=>x.email.toLowerCase()===email&&x.password===pass);
- if(!u)return alert("メールアドレスまたはパスワードが違います");
- currentUser={id:u.id,name:u.name,email:u.email,role:u.role};
- localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
- applyPermissions();
- document.getElementById("loginOverlay").classList.add("hidden");
+  const email=document.getElementById("loginEmail").value.trim().toLowerCase();
+  const pass=document.getElementById("loginPassword").value;
+  try{
+    const data=await serverLogin(email,pass);
+    apiToken=data.token;
+    localStorage.setItem(API_TOKEN_KEY,apiToken);
+    currentUser={id:data.user.id,name:data.user.name,email:data.user.email,role:data.user.role};
+    localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+    applyPermissions();
+    document.getElementById("loginOverlay").classList.add("hidden");
+  }catch(e){
+    if(e.message==="invalid_credentials"){
+      alert("メールアドレスまたはパスワードが正しくありません。");
+      return;
+    }
+    clearStoredAuth();
+    applyPermissions();
+    alert("サーバー接続エラーが発生しました。時間をおいて再度お試しください。");
+  }
 }
 function logoutAce(){
- clearApiToken();localStorage.removeItem(AUTH_KEY);currentUser=null;
- document.getElementById("loginOverlay").classList.remove("hidden");
+  clearStoredAuth();
+  applyPermissions();
 }
-function restoreAuth(){
- try{
-   const u=JSON.parse(localStorage.getItem(AUTH_KEY)||"null");
-   if(u){currentUser=u;document.getElementById("loginOverlay").classList.add("hidden");}
- }catch(e){}
- applyPermissions();
+async function restoreAuth(){
+  try{
+    const u=JSON.parse(localStorage.getItem(AUTH_KEY)||"null");
+    if(!u||!apiToken){
+      clearStoredAuth();
+      applyPermissions();
+      return;
+    }
+    const data=await apiFetch("/api/auth/me");
+    currentUser={id:data.user.id,name:data.user.name,email:data.user.email,role:data.user.role};
+    localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+    document.getElementById("loginOverlay").classList.add("hidden");
+  }catch(e){
+    clearStoredAuth();
+  }
+  applyPermissions();
 }
 function can(action){
  const r=currentUser?.role;
@@ -2752,34 +2763,37 @@ async function syncPaymentStatus(){
 }
 
 async function syncUsersFromServer(){
- if(!apiConfig.online)return alert("API未接続です");
- try{
-   const data=await apiFetch("/api/users");
-   users=data.map(u=>({...u,password:""}));
-   renderUsers();
- }catch(e){alert("ユーザー取得失敗: "+e.message)}
+  if(!apiConfig.online)return alert("API未接続です");
+  try{
+    const data=await apiFetch("/api/users");
+    users=data.map(u=>({id:u.id,name:u.name,email:u.email,role:u.role}));
+    renderUsers();
+  }catch(e){alert("ユーザー取得失敗: "+e.message)}
 }
-async function createServerUser(u){
- if(!apiConfig.online)return;
- await safeWrite("/api/users",{method:"POST",body:JSON.stringify({
-   name:u.name,email:u.email,password:u.password||"demo",role:u.role
- })});
+async function createServerUser(payload){
+  if(!apiConfig.online)throw new Error("API未接続です");
+  await apiFetch("/api/users",{method:"POST",body:JSON.stringify(payload)});
 }
 async function updateServerUserRole(id,role){
- if(!apiConfig.online)return;
- await apiFetch(`/api/users/${id}/role`,{method:"PATCH",body:JSON.stringify({role})});
+  if(!apiConfig.online)return;
+  await apiFetch(`/api/users/${id}/role`,{method:"PATCH",body:JSON.stringify({role})});
 }
 
 function renderUsers(){
- const tb=document.getElementById("userTable");if(!tb)return;
- tb.innerHTML=users.map(u=>`<tr><td>${u.name}</td><td>${u.email}</td><td><span class="role-${u.role}">${roleLabels[u.role]}</span></td><td>${currentUser?.role==="admin"?`<button class="btn light" style="padding:5px 7px;font-size:10px" onclick="changeRole(${u.id})">権限変更</button>`:"-"}</td></tr>`).join("");
+  const tb=document.getElementById("userTable");if(!tb)return;
+  tb.innerHTML=users.map(u=>`<tr><td>${u.name}</td><td>${u.email}</td><td><span class="role-${u.role}">${roleLabels[u.role]}</span></td><td>${currentUser?.role==="admin"?`<button class="btn light" style="padding:5px 7px;font-size:10px" onclick="changeRole(${u.id})">権限変更</button>`:"-"}</td></tr>`).join("");
 }
 function addUser(){
- if(!requirePermission("write")||currentUser?.role!=="admin")return;
- const name=prompt("名前");if(!name)return;
- const email=prompt("メールアドレス");if(!email)return;
- const role=prompt("権限: admin / manager / staff / viewer","staff");if(!role||!["admin","manager","staff","viewer"].includes(role))return;
- const nu={id:Date.now(),name,email,password:"demo",role};users.push(nu);if(apiConfig.online)createServerUser(nu).catch(e=>alert("サーバー保存失敗: "+e.message));renderUsers();
+  if(!requirePermission("write")||currentUser?.role!=="admin")return;
+  const name=(prompt("名前")||"").trim();if(!name)return;
+  const email=(prompt("メールアドレス")||"").trim().toLowerCase();if(!email)return;
+  const role=(prompt("権限: admin / manager / staff / viewer","staff")||"").trim();if(!role||!["admin","manager","staff","viewer"].includes(role))return;
+  const password=(prompt("初期パスワード（12文字以上）")||"");
+  if(password.trim()==="")return alert("初期パスワードを入力してください。");
+  if(password.length<12)return alert("初期パスワードは12文字以上で入力してください。");
+  createServerUser({name,email,password,role})
+    .then(()=>syncUsersFromServer())
+    .catch(e=>alert("サーバー保存失敗: "+e.message));
 }
 function changeRole(id){
  if(currentUser?.role!=="admin")return;
@@ -2908,10 +2922,10 @@ async function apiFetch(path,options={}){
  if(apiToken)headers["Authorization"]="Bearer "+apiToken;
  const res=await fetch(base+path,{...options,headers});
  if(res.status===401){
-   clearApiToken();
-   setSyncStatus(false,"認証期限切れ");
-   throw new Error("401 Unauthorized");
- }
+    clearStoredAuth();
+    setSyncStatus(false,"認証期限切れ");
+    throw new Error("401 Unauthorized");
+  }
  if(res.status===403)throw new Error("403 Forbidden");
  if(!res.ok)throw new Error(`${res.status} ${res.statusText}`);
  return res.status===204?null:res.json();
