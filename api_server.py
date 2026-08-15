@@ -595,6 +595,12 @@ def login():
     db.session.commit()
     return jsonify({"token":u.token,"user":{"id":u.id,"name":u.name,"email":u.email,"role":u.role}})
 
+@app.get("/api/auth/me")
+@auth_required("viewer")
+def auth_me():
+    u=g.user
+    return jsonify({"user":{"id":u.id,"name":u.name,"email":u.email,"role":u.role}})
+
 
 @app.get("/api/push/config")
 @auth_required("viewer")
@@ -3560,8 +3566,18 @@ def get_users():
 @auth_required("admin")
 def create_user():
     d=request.get_json() or {}
-    if User.query.filter_by(email=d["email"].lower()).first():return jsonify({"error":"email_exists"}),409
-    u=User(name=d["name"],email=d["email"].lower(),password_hash=generate_password_hash(d.get("password","demo")),role=d.get("role","staff"))
+    name=(d.get("name") or "").strip()
+    email=(d.get("email") or "").strip().lower()
+    raw_password=(d.get("password") or "")
+    role=d.get("role") or "staff"
+    if not name or not email or not raw_password:
+        return jsonify({"error":"missing_fields"}),400
+    if raw_password.strip()=="" or len(raw_password)<12:
+        return jsonify({"error":"password_too_short"}),400
+    if role not in ROLE_ORDER:
+        return jsonify({"error":"invalid_role"}),400
+    if User.query.filter_by(email=email).first():return jsonify({"error":"email_exists"}),409
+    u=User(name=name,email=email,password_hash=generate_password_hash(raw_password),role=role)
     db.session.add(u);db.session.commit();return jsonify({"id":u.id}),201
 
 @app.patch("/api/users/<int:user_id>/role")
@@ -3693,13 +3709,8 @@ def upload_photo():
 @app.get("/uploads/<path:filename>")
 def uploaded(filename):return send_from_directory(UPLOAD_DIR,filename)
 
-def bootstrap():
-    if not User.query.filter_by(email="admin@ace.local").first():
-        db.session.add(User(name="ACE 管理者",email="admin@ace.local",password_hash=generate_password_hash("demo"),role="admin"))
-        db.session.commit()
-
 with app.app_context():
-    _initialize_production_once()
+   _initialize_production_once()
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.getenv("PORT","8000")),debug=False)
