@@ -3231,24 +3231,18 @@ async function persistState(state,token){
   }catch(e){
     if(token!==saveStateToken)return;
     console.warn("saveState failed",e);
-    if(isStorageQuotaError(e)){
-      setSaveStatusText("端末の保存容量が不足しています");
-      return;
-    }
-    try{
-      localStorage.setItem(STORAGE_KEY,JSON.stringify(compact));
-      setSaveStatusText("保存済み");
-    }catch(inner){
-      console.warn("localStorage fallback failed",inner);
-      setSaveStatusText(isStorageQuotaError(inner)?"端末の保存容量が不足しています":"保存失敗");
-    }
+    setSaveStatusText(isStorageQuotaError(e)?"端末の保存容量が不足しています":"保存失敗");
   }
 }
+function waitForIndexedHydration(){
+  if(hydrationStatePromise)return hydrationStatePromise.catch(e=>console.warn("waitForIndexedHydration failed",e));
+  return Promise.resolve();
+}
 function saveState(){
-  const state=currentAceState();
   const token=++saveStateToken;
   persistStateQueue=persistStateQueue
-    .then(()=>persistState(state,token))
+    .then(()=>waitForIndexedHydration())
+    .then(()=>persistState(currentAceState(),token))
     .catch(e=>console.warn("persistState queue failed",e));
   return persistStateQueue;
 }
@@ -13767,9 +13761,12 @@ window.addEventListener("online",()=>{setSyncStatus(true,"オンライン復帰"
 window.addEventListener("offline",()=>{setSyncStatus(false,"オフライン");});
 registerServiceWorker();setTimeout(updatePushStatus,800);
 
-loadState();restoreApiConfig();restoreAuth();
-renderDashboard();updateNotifyCount();renderExecutiveDashboard();setTimeout(maybeGenerateScheduledAiComment,0);renderWorkflowDashboard();renderFinanceDashboard();pullEstimateApprovals();renderFieldwork();renderProcurementOverview();renderToolManagement();pullPortalRequests();renderSyncPage();setupCoreAutoSync();renderWorkforce();renderGeoStatus();renderRouteMap();renderStaffLocations();syncDelayAutomationInputs();setupEtaRefresh();loadGoogleMapsFrontendKey();renderLocationSharingStatus();syncTrackingPrivacyInputs();pullSharedLocations();renderPublicTrackingPage();renderBookingCalendar();renderSlaReport();refreshGoogleCalendarStatus();renderCampaignPerformance();renderLineScenarios();renderLineCrm();renderInventory();renderScrapInventory();calculateCircularKpis();renderPurchaseOrderHistory();renderMasters();renderMonthlyPnL();renderStaffReports();renderNotificationRules();renderAutoNotificationQueue();renderCustomers();renderProjects();renderBookings();renderMemberships();fillLine();lineDraft();updatePhotoKpi();updateMembershipKpis();
-saveState();
+async function bootstrapApp(){
+ loadState();restoreApiConfig();restoreAuth();
+ renderDashboard();updateNotifyCount();renderExecutiveDashboard();setTimeout(maybeGenerateScheduledAiComment,0);renderWorkflowDashboard();renderFinanceDashboard();pullEstimateApprovals();renderFieldwork();renderProcurementOverview();renderToolManagement();pullPortalRequests();renderSyncPage();setupCoreAutoSync();renderWorkforce();renderGeoStatus();renderRouteMap();renderStaffLocations();syncDelayAutomationInputs();setupEtaRefresh();loadGoogleMapsFrontendKey();renderLocationSharingStatus();syncTrackingPrivacyInputs();pullSharedLocations();renderPublicTrackingPage();renderBookingCalendar();renderSlaReport();refreshGoogleCalendarStatus();renderCampaignPerformance();renderLineScenarios();renderLineCrm();renderInventory();renderScrapInventory();calculateCircularKpis();renderPurchaseOrderHistory();renderMasters();renderMonthlyPnL();renderStaffReports();renderNotificationRules();renderAutoNotificationQueue();renderCustomers();renderProjects();renderBookings();renderMemberships();fillLine();lineDraft();updatePhotoKpi();updateMembershipKpis();
+ await saveState();
+}
+bootstrapApp();
 </script>
 
 <div class="sync-panel hidden" id="syncPanel">
