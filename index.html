@@ -2789,8 +2789,8 @@ function addUser(){
   const name=(prompt("名前")||"").trim();if(!name)return;
   const email=(prompt("メールアドレス")||"").trim().toLowerCase();if(!email)return;
   const role=(prompt("権限: admin / manager / staff / viewer","staff")||"").trim();if(!role||!["admin","manager","staff","viewer"].includes(role))return;
-  const ******"初期パスワード（12文字以上）")||"");
-  if(******"")return;
+  const password=(prompt("初期パスワード（12文字以上）")||"");
+  if(password==="")return;
   if(password.trim()==="")return alert("初期パスワードを入力してください。");
   if(password.length<12)return alert("初期パスワードは12文字以上で入力してください。");
   createServerUser({name,email,password,role})
