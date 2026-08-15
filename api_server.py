@@ -3572,7 +3572,9 @@ def create_user():
     role=d.get("role") or "staff"
     if not name or not email or not raw_password:
         return jsonify({"error":"missing_fields"}),400
-    if raw_password.strip()=="" or len(raw_password)<12:
+    if raw_password.strip()=="":
+        return jsonify({"error":"password_invalid"}),400
+    if len(raw_password)<12:
         return jsonify({"error":"password_too_short"}),400
     if role not in ROLE_ORDER:
         return jsonify({"error":"invalid_role"}),400
