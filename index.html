@@ -3049,200 +3049,361 @@ function exportAuditLog(){
 }
 
 const STORAGE_KEY="ace_app_state_v17";
+const STORAGE_META_KEY="ace_app_state_meta_v1";
+const IDB_DB_NAME="ace_app_state_db";
+const IDB_STORE_NAME="state_store";
+const IDB_FULL_STATE_KEY="full_state";
+let saveStateToken=0;
+let hydrationStatePromise=null;
+let hydratedIndexedState=false;
+let persistStateQueue=Promise.resolve();
 
-function saveState(){
-  try{
-    const state={
-      customers,
-      projects,
-      bookings,
-      lineConfig,
-      lineQueueData,
-      lineUserData,
-      selectedCustomer:cid,
-      selectedProject:pid,
-      selectedMembership,
-      currentScore,
-      estimateRows,
-      auditLog,
-      notifications,
-      notificationRules,
-      autoNotificationQueue,
-      monthlyCloseState,
-      vendors,
-      materialMasters,
-      priceMasters,
-      purchaseOrderDraft,
-      purchaseOrders,
-      targetGrossMargin,
-      estimateTemplates,
-      estimateRooms,
-      shapeRects,
-      scrapInventory,
-      circularOptimizationHistory,
-      circularTargets,
-      lineCampaignDraft,
-      lineCampaignHistory,
-      lineScenarios,
-      lineCrmItems,
-      crmTasks,
-      googleCalendarConfig,
-      calendarSyncConflicts,
-      bookingHistory,
-      bookingReminderConfig,
-      workforceRoutes,
-      geocodeCache,
-      currentStaffLocation,
-      delayNotificationHistory,
-      staffLocations,
-      delayAutomationConfig,
-      customerTrackingLinks,
-      trackingPrivacyConfig,
-      arrivalNoticeHistory,
-      coreSyncState,
-      cloudFiles,
-      extendedSyncState,
-      documentIssueHistory,
-      documentDeliveryHistory,
-      customerPortals,
-      portalRequests,
-      portalNotices,
-      portalPhotos
+function currentAceState(){
+  return {
+    customers,
+    projects,
+    bookings,
+    lineConfig,
+    lineQueueData,
+    lineUserData,
+    selectedCustomer:cid,
+    selectedProject:pid,
+    selectedMembership,
+    currentScore,
+    estimateRows,
+    auditLog,
+    notifications,
+    notificationRules,
+    autoNotificationQueue,
+    monthlyCloseState,
+    vendors,
+    materialMasters,
+    priceMasters,
+    purchaseOrderDraft,
+    purchaseOrders,
+    targetGrossMargin,
+    estimateTemplates,
+    estimateRooms,
+    shapeRects,
+    scrapInventory,
+    circularOptimizationHistory,
+    circularTargets,
+    lineCampaignDraft,
+    lineCampaignHistory,
+    lineScenarios,
+    lineCrmItems,
+    crmTasks,
+    googleCalendarConfig,
+    calendarSyncConflicts,
+    bookingHistory,
+    bookingReminderConfig,
+    workforceRoutes,
+    geocodeCache,
+    currentStaffLocation,
+    delayNotificationHistory,
+    staffLocations,
+    delayAutomationConfig,
+    customerTrackingLinks,
+    trackingPrivacyConfig,
+    arrivalNoticeHistory,
+    coreSyncState,
+    customerSignatures,
+    cloudFiles,
+    extendedSyncState,
+    documentIssueHistory,
+    documentDeliveryHistory,
+    customerPortals,
+    portalRequests,
+    portalNotices,
+    portalPhotos
+  };
+}
+function setSaveStatusText(text){
+  const el=document.getElementById("saveStatus");
+  if(el)el.textContent=text;
+}
+function isLargeDataUrl(v){
+  return typeof v==="string"&&v.startsWith("data:");
+}
+function statePayloadSummary(state){
+  const summary={dataUrlCount:0,dataUrlBytes:0};
+  const add=v=>{
+    if(typeof v!=="string"||!v.startsWith("data:"))return;
+    summary.dataUrlCount++;
+    summary.dataUrlBytes+=v.length;
+  };
+  (state.customers||[]).forEach(c=>(c.photos||[]).forEach(p=>{add(p?.data);add(p?.markedData);}));
+  (state.projects||[]).forEach(p=>{
+    (p.photos||[]).forEach(ph=>{add(ph?.data);add(ph?.markedData);});
+    (p.expenseItems||[]).forEach(ex=>add(ex?.receiptData));
+  });
+  (state.scrapInventory||[]).forEach(s=>add(s?.photoData));
+  Object.values(state.customerSignatures||{}).forEach(sig=>add(sig?.dataUrl));
+  return summary;
+}
+function compactStateForLocalStorage(sourceState){
+  const state=JSON.parse(JSON.stringify(sourceState));
+  let offloaded=0;
+  const clearField=(obj,key)=>{
+    if(!obj||!Object.prototype.hasOwnProperty.call(obj,key))return;
+    if(!isLargeDataUrl(obj[key]))return;
+    obj[key]=null;
+    offloaded++;
+  };
+  (state.customers||[]).forEach(c=>(c.photos||[]).forEach(p=>{clearField(p,"data");clearField(p,"markedData");}));
+  (state.projects||[]).forEach(p=>{
+    (p.photos||[]).forEach(ph=>{clearField(ph,"data");clearField(ph,"markedData");});
+    (p.expenseItems||[]).forEach(ex=>clearField(ex,"receiptData"));
+  });
+  (state.scrapInventory||[]).forEach(s=>clearField(s,"photoData"));
+  Object.values(state.customerSignatures||{}).forEach(sig=>clearField(sig,"dataUrl"));
+  state._storageMeta={schema:1,usesIndexedDb:true,offloadedCount:offloaded,savedAt:new Date().toISOString()};
+  return state;
+}
+function openStateDb(){
+  return new Promise((resolve,reject)=>{
+    if(!window.indexedDB)return reject(new Error("indexedDB unavailable"));
+    const req=indexedDB.open(IDB_DB_NAME,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(IDB_STORE_NAME))db.createObjectStore(IDB_STORE_NAME);
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    const s=document.getElementById('saveStatus');
-    if(s)s.textContent="保存済み";
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error||new Error("indexedDB open failed"));
+  });
+}
+async function writeFullStateToIndexedDb(state){
+  const db=await openStateDb();
+  await new Promise((resolve,reject)=>{
+    const tx=db.transaction(IDB_STORE_NAME,"readwrite");
+    tx.objectStore(IDB_STORE_NAME).put(state,IDB_FULL_STATE_KEY);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error||new Error("indexedDB write failed"));
+    tx.onabort=()=>reject(tx.error||new Error("indexedDB write aborted"));
+  });
+  db.close();
+}
+async function readFullStateFromIndexedDb(){
+  const db=await openStateDb();
+  const data=await new Promise((resolve,reject)=>{
+    const tx=db.transaction(IDB_STORE_NAME,"readonly");
+    const req=tx.objectStore(IDB_STORE_NAME).get(IDB_FULL_STATE_KEY);
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error||new Error("indexedDB read failed"));
+  });
+  db.close();
+  return data;
+}
+async function clearFullStateFromIndexedDb(){
+  try{
+    const db=await openStateDb();
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction(IDB_STORE_NAME,"readwrite");
+      tx.objectStore(IDB_STORE_NAME).delete(IDB_FULL_STATE_KEY);
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error||new Error("indexedDB delete failed"));
+      tx.onabort=()=>reject(tx.error||new Error("indexedDB delete aborted"));
+    });
+    db.close();
   }catch(e){
-    console.warn("saveState failed",e);
-    const s=document.getElementById('saveStatus');
-    if(s)s.textContent="保存失敗";
+    console.warn("clearFullStateFromIndexedDb failed",e);
   }
+}
+function isStorageQuotaError(err){
+  const name=String(err?.name||"");
+  const msg=String(err?.message||"");
+  return name==="QuotaExceededError"||name==="NS_ERROR_DOM_QUOTA_REACHED"||/quota|capacity|容量|storage/i.test(msg);
+}
+async function persistState(state,token){
+  try{
+    const summary=statePayloadSummary(state);
+    await writeFullStateToIndexedDb(state);
+    if(token!==saveStateToken)return;
+    const compact=compactStateForLocalStorage(state);
+    localStorage.setItem(STORAGE_KEY,JSON.stringify(compact));
+    localStorage.setItem(STORAGE_META_KEY,JSON.stringify({
+      savedAt:new Date().toISOString(),
+      usesIndexedDb:true,
+      dataUrlCount:summary.dataUrlCount,
+      dataUrlBytes:summary.dataUrlBytes
+    }));
+    setSaveStatusText("保存済み");
+  }catch(e){
+    if(token!==saveStateToken)return;
+    console.warn("saveState failed",e);
+    setSaveStatusText(isStorageQuotaError(e)?"端末の保存容量が不足しています":"保存失敗");
+  }
+}
+function waitForIndexedHydration(){
+  if(hydrationStatePromise)return hydrationStatePromise.catch(e=>console.warn("waitForIndexedHydration failed",e));
+  return Promise.resolve();
+}
+function saveState(){
+  const token=++saveStateToken;
+  persistStateQueue=persistStateQueue
+    .then(()=>waitForIndexedHydration())
+    .then(()=>persistState(currentAceState(),token))
+    .catch(e=>console.warn("persistState queue failed",e));
+  return persistStateQueue;
+}
+function applyLoadedState(s){
+  if(Array.isArray(s.customers))customers=s.customers;
+  if(Array.isArray(s.projects))projects=s.projects;
+  if(Array.isArray(s.bookings))bookings=s.bookings;
+  if(s.lineConfig)lineConfig=s.lineConfig;
+  if(Array.isArray(s.lineQueueData))lineQueueData=s.lineQueueData;
+  if(Array.isArray(s.lineUserData))lineUserData=s.lineUserData;
+  if(s.selectedCustomer)cid=s.selectedCustomer;
+  if(s.selectedProject)pid=s.selectedProject;
+  if(s.selectedMembership)selectedMembership=s.selectedMembership;
+  if(typeof s.currentScore==="number")currentScore=s.currentScore;
+  if(Array.isArray(s.estimateRows))estimateRows=s.estimateRows;
+  if(Array.isArray(s.auditLog))auditLog=s.auditLog;
+  if(Array.isArray(s.notifications))notifications=s.notifications;
+  if(Array.isArray(s.notificationRules))notificationRules=s.notificationRules;
+  if(Array.isArray(s.autoNotificationQueue))autoNotificationQueue=s.autoNotificationQueue;
+  if(s.monthlyCloseState)monthlyCloseState=s.monthlyCloseState;
+  if(Array.isArray(s.vendors))vendors=s.vendors;
+  if(Array.isArray(s.materialMasters))materialMasters=s.materialMasters;
+  if(Array.isArray(s.priceMasters))priceMasters=s.priceMasters;
+  if(Array.isArray(s.purchaseOrderDraft))purchaseOrderDraft=s.purchaseOrderDraft;
+  if(Array.isArray(s.purchaseOrders))purchaseOrders=s.purchaseOrders;
+  if(typeof s.targetGrossMargin==='number')targetGrossMargin=s.targetGrossMargin;
+  if(Array.isArray(s.estimateTemplates))estimateTemplates=s.estimateTemplates;
+  if(Array.isArray(s.estimateRooms))estimateRooms=s.estimateRooms;
+  if(Array.isArray(s.shapeRects))shapeRects=s.shapeRects;
+  if(Array.isArray(s.scrapInventory))scrapInventory=s.scrapInventory;
+  if(Array.isArray(s.circularOptimizationHistory))circularOptimizationHistory=s.circularOptimizationHistory;
+  if(s.circularTargets)circularTargets=s.circularTargets;
+  if(Array.isArray(s.lineCampaignDraft))lineCampaignDraft=s.lineCampaignDraft;
+  if(Array.isArray(s.lineCampaignHistory))lineCampaignHistory=s.lineCampaignHistory;
+  if(Array.isArray(s.lineScenarios))lineScenarios=s.lineScenarios;
+  if(Array.isArray(s.lineCrmItems))lineCrmItems=s.lineCrmItems;
+  if(Array.isArray(s.crmTasks))crmTasks=s.crmTasks;
+  if(s.googleCalendarConfig)googleCalendarConfig=s.googleCalendarConfig;
+  if(Array.isArray(s.calendarSyncConflicts))calendarSyncConflicts=s.calendarSyncConflicts;
+  if(Array.isArray(s.bookingHistory))bookingHistory=s.bookingHistory;
+  if(s.bookingReminderConfig)bookingReminderConfig=s.bookingReminderConfig;
+  if(s.workforceRoutes)workforceRoutes=s.workforceRoutes;
+  if(Array.isArray(s.procurementCandidates))procurementCandidates=s.procurementCandidates;
+  if(s.staffSkillProfiles)staffSkillProfiles=s.staffSkillProfiles;
+  if(Array.isArray(s.toolMasters))toolMasters=s.toolMasters;
+  if(Array.isArray(s.toolCheckouts))toolCheckouts=s.toolCheckouts;
+  if(s.departureChecks)departureChecks=s.departureChecks;
+  if(Array.isArray(s.progressPinnedItems))progressPinnedItems=s.progressPinnedItems;
+  if(s.homeCarryChecks)homeCarryChecks=s.homeCarryChecks;
+  if(Array.isArray(s.fieldworkLogs))fieldworkLogs=s.fieldworkLogs;
+  if(s.completionChecks)completionChecks=s.completionChecks;
+  if(s.customerSignatures)customerSignatures=s.customerSignatures;
+  if(s.standardWorkTimes)standardWorkTimes=s.standardWorkTimes;
+  if(s.completionArchives)completionArchives=s.completionArchives;
+  if(s.inspectionRecords)inspectionRecords=s.inspectionRecords;
+  if(Array.isArray(s.warrantyRules))warrantyRules=s.warrantyRules;
+  if(s.repairEstimates)repairEstimates=s.repairEstimates;
+  if(s.estimateApprovals)estimateApprovals=s.estimateApprovals;
+  if(Array.isArray(s.financeRecords))financeRecords=s.financeRecords;
+  if(Array.isArray(s.invoiceRecords))invoiceRecords=s.invoiceRecords;
+  if(s.projectCostBreakdowns)projectCostBreakdowns=s.projectCostBreakdowns;
+  if(s.staffPayrollMaster)staffPayrollMaster=s.staffPayrollMaster;
+  if(s.invoiceReminderConfig)invoiceReminderConfig=s.invoiceReminderConfig;
+  if(Array.isArray(s.bankTransactions))bankTransactions=s.bankTransactions;
+  if(Array.isArray(s.expenseRecords))expenseRecords=s.expenseRecords;
+  if(Array.isArray(s.fixedCostRecords))fixedCostRecords=s.fixedCostRecords;
+  if(Number.isFinite(s.cashStartingBalance))cashStartingBalance=s.cashStartingBalance;
+  if(Number.isFinite(s.fixedCostBudgetMonthly))fixedCostBudgetMonthly=s.fixedCostBudgetMonthly;
+  if(Array.isArray(s.managementAlerts))managementAlerts=s.managementAlerts;
+  if(s.monthlyBudgets)monthlyBudgets=s.monthlyBudgets;
+  if(Array.isArray(s.workflowTasks))workflowTasks=s.workflowTasks;
+  if(s.workflowState)workflowState=s.workflowState;
+  if(s.workflowRules)workflowRules=s.workflowRules;
+  if(Array.isArray(s.workflowExceptions))workflowExceptions=s.workflowExceptions;
+  if(Array.isArray(s.workflowAutoActionHistory))workflowAutoActionHistory=s.workflowAutoActionHistory;
+  if(s.backupState)backupState=s.backupState;
+  if(Array.isArray(s.deletedRecoveryItems))deletedRecoveryItems=s.deletedRecoveryItems;
+  if(Array.isArray(s.serverAuditLogs))serverAuditLogs=s.serverAuditLogs;
+  if(Array.isArray(s.disasterBackups))disasterBackups=s.disasterBackups;
+  if(s.backupAutomationConfig)backupAutomationConfig=s.backupAutomationConfig;
+  if(s.securityState)securityState=s.securityState;
+  if(s.rolePermissions)rolePermissions=s.rolePermissions;
+  if(Array.isArray(s.securityEvents))securityEvents=s.securityEvents;
+  if(Array.isArray(s.deviceApprovals))deviceApprovals=s.deviceApprovals;
+  if(s.securityPolicy)securityPolicy=s.securityPolicy;
+  if(Array.isArray(s.offlineSyncQueue))offlineSyncQueue=s.offlineSyncQueue;
+  if(s.mobileSyncState)mobileSyncState=s.mobileSyncState;
+  if(Array.isArray(s.syncConflicts))syncConflicts=s.syncConflicts;
+  if(Array.isArray(s.lineAutomationRules))lineAutomationRules=s.lineAutomationRules;
+  if(Array.isArray(s.communicationHistory))communicationHistory=s.communicationHistory;
+  if(s.reconciliationRules)reconciliationRules=s.reconciliationRules;
+  if(Array.isArray(s.reconciliationHistory))reconciliationHistory=s.reconciliationHistory;
+  if(s.aiManagementState)aiManagementState=s.aiManagementState;
+  if(Array.isArray(s.kpiSnapshots))kpiSnapshots=s.kpiSnapshots;
+  if(Array.isArray(s.nextMonthActions))nextMonthActions=s.nextMonthActions;
+  if(s.aiManagementSchedule)aiManagementSchedule=s.aiManagementSchedule;
+  if(Array.isArray(s.subcontractors))subcontractors=s.subcontractors;
+  if(Array.isArray(s.subcontractOrders))subcontractOrders=s.subcontractOrders;
+  if(s.accountingMappings)accountingMappings=s.accountingMappings;
+  if(Array.isArray(s.journalEntries))journalEntries=s.journalEntries;
+  if(s.portalAdminState)portalAdminState=s.portalAdminState;
+  if(Array.isArray(s.preReleaseTestResults))preReleaseTestResults=s.preReleaseTestResults;
+  if(s.deploymentState)deploymentState=s.deploymentState;
+  if(s.releaseChecklistState)releaseChecklistState=s.releaseChecklistState;
+  if(Array.isArray(s.releaseDiagnostics))releaseDiagnostics=s.releaseDiagnostics;
+  if(Array.isArray(s.regressionResults))regressionResults=s.regressionResults;
+  if(s.releaseCandidate)releaseCandidate=s.releaseCandidate;
+  if(s.geocodeCache)geocodeCache=s.geocodeCache;
+  if(s.currentStaffLocation)currentStaffLocation=s.currentStaffLocation;
+  if(Array.isArray(s.delayNotificationHistory))delayNotificationHistory=s.delayNotificationHistory;
+  if(s.staffLocations)staffLocations=s.staffLocations;
+  if(s.delayAutomationConfig)delayAutomationConfig=s.delayAutomationConfig;
+  if(Array.isArray(s.customerTrackingLinks))customerTrackingLinks=s.customerTrackingLinks;
+  if(s.trackingPrivacyConfig)trackingPrivacyConfig=s.trackingPrivacyConfig;
+  if(Array.isArray(s.arrivalNoticeHistory))arrivalNoticeHistory=s.arrivalNoticeHistory;
+  if(s.coreSyncState)coreSyncState=s.coreSyncState;
+  if(Array.isArray(s.cloudFiles))cloudFiles=s.cloudFiles;
+  if(s.extendedSyncState)extendedSyncState=s.extendedSyncState;
+  if(Array.isArray(s.documentIssueHistory))documentIssueHistory=s.documentIssueHistory;
+  if(Array.isArray(s.documentDeliveryHistory))documentDeliveryHistory=s.documentDeliveryHistory;
+  if(Array.isArray(s.customerPortals))customerPortals=s.customerPortals;
+  if(Array.isArray(s.portalRequests))portalRequests=s.portalRequests;
+  if(Array.isArray(s.portalNotices))portalNotices=s.portalNotices;
+  if(Array.isArray(s.portalPhotos))portalPhotos=s.portalPhotos;
+}
+function rerenderAfterHydration(){
+  try{
+    updatePhotoKpi();
+    renderCustomers();
+    renderProjects();
+    renderPDetail();
+    renderCDetail();
+    renderScrapInventory();
+  }catch(e){
+    console.warn("rerenderAfterHydration failed",e);
+  }
+}
+function hydrateLargeStateFromIndexedDb(){
+  if(hydratedIndexedState)return Promise.resolve(true);
+  if(hydrationStatePromise)return hydrationStatePromise;
+  hydrationStatePromise=(async()=>{
+    try{
+      const full=await readFullStateFromIndexedDb();
+      if(!full){hydratedIndexedState=true;return;}
+      applyLoadedState(full);
+      hydratedIndexedState=true;
+      rerenderAfterHydration();
+      setSaveStatusText("保存済み");
+    }catch(e){
+      console.warn("hydrateLargeStateFromIndexedDb failed",e);
+    }
+  })().finally(()=>{hydrationStatePromise=null;});
+  return hydrationStatePromise;
 }
 function loadState(){
   try{
     const raw=localStorage.getItem(STORAGE_KEY);
     if(!raw)return false;
     const s=JSON.parse(raw);
-    if(Array.isArray(s.customers))customers=s.customers;
-    if(Array.isArray(s.projects))projects=s.projects;
-    if(Array.isArray(s.bookings))bookings=s.bookings;
-    if(s.lineConfig)lineConfig=s.lineConfig;
-    if(Array.isArray(s.lineQueueData))lineQueueData=s.lineQueueData;
-    if(Array.isArray(s.lineUserData))lineUserData=s.lineUserData;
-    if(s.selectedCustomer)cid=s.selectedCustomer;
-    if(s.selectedProject)pid=s.selectedProject;
-    if(s.selectedMembership)selectedMembership=s.selectedMembership;
-    if(typeof s.currentScore==="number")currentScore=s.currentScore;
-    if(Array.isArray(s.estimateRows))estimateRows=s.estimateRows;
-    if(Array.isArray(s.auditLog))auditLog=s.auditLog;
-    if(Array.isArray(s.notifications))notifications=s.notifications;
-    if(Array.isArray(s.notificationRules))notificationRules=s.notificationRules;
-    if(Array.isArray(s.autoNotificationQueue))autoNotificationQueue=s.autoNotificationQueue;
-    if(s.monthlyCloseState)monthlyCloseState=s.monthlyCloseState;
-    if(Array.isArray(s.vendors))vendors=s.vendors;
-    if(Array.isArray(s.materialMasters))materialMasters=s.materialMasters;
-    if(Array.isArray(s.priceMasters))priceMasters=s.priceMasters;
-    if(Array.isArray(s.purchaseOrderDraft))purchaseOrderDraft=s.purchaseOrderDraft;
-    if(Array.isArray(s.purchaseOrders))purchaseOrders=s.purchaseOrders;
-    if(typeof s.targetGrossMargin==='number')targetGrossMargin=s.targetGrossMargin;
-    if(Array.isArray(s.estimateTemplates))estimateTemplates=s.estimateTemplates;
-    if(Array.isArray(s.estimateRooms))estimateRooms=s.estimateRooms;
-    if(Array.isArray(s.shapeRects))shapeRects=s.shapeRects;
-    if(Array.isArray(s.scrapInventory))scrapInventory=s.scrapInventory;
-    if(Array.isArray(s.circularOptimizationHistory))circularOptimizationHistory=s.circularOptimizationHistory;
-    if(s.circularTargets)circularTargets=s.circularTargets;
-    if(Array.isArray(s.lineCampaignDraft))lineCampaignDraft=s.lineCampaignDraft;
-    if(Array.isArray(s.lineCampaignHistory))lineCampaignHistory=s.lineCampaignHistory;
-    if(Array.isArray(s.lineScenarios))lineScenarios=s.lineScenarios;
-    if(Array.isArray(s.lineCrmItems))lineCrmItems=s.lineCrmItems;
-    if(Array.isArray(s.crmTasks))crmTasks=s.crmTasks;
-    if(s.googleCalendarConfig)googleCalendarConfig=s.googleCalendarConfig;
-    if(Array.isArray(s.calendarSyncConflicts))calendarSyncConflicts=s.calendarSyncConflicts;
-    if(Array.isArray(s.bookingHistory))bookingHistory=s.bookingHistory;
-    if(s.bookingReminderConfig)bookingReminderConfig=s.bookingReminderConfig;
-    if(s.workforceRoutes)workforceRoutes=s.workforceRoutes;
-    if(Array.isArray(s.procurementCandidates))procurementCandidates=s.procurementCandidates;
-    if(s.staffSkillProfiles)staffSkillProfiles=s.staffSkillProfiles;
-    if(Array.isArray(s.toolMasters))toolMasters=s.toolMasters;
-    if(Array.isArray(s.toolCheckouts))toolCheckouts=s.toolCheckouts;
-    if(s.departureChecks)departureChecks=s.departureChecks;
-    if(Array.isArray(s.progressPinnedItems))progressPinnedItems=s.progressPinnedItems;
-    if(s.homeCarryChecks)homeCarryChecks=s.homeCarryChecks;
-    if(Array.isArray(s.fieldworkLogs))fieldworkLogs=s.fieldworkLogs;
-    if(s.completionChecks)completionChecks=s.completionChecks;
-    if(s.customerSignatures)customerSignatures=s.customerSignatures;
-    if(s.standardWorkTimes)standardWorkTimes=s.standardWorkTimes;
-    if(s.completionArchives)completionArchives=s.completionArchives;
-    if(s.inspectionRecords)inspectionRecords=s.inspectionRecords;
-    if(Array.isArray(s.warrantyRules))warrantyRules=s.warrantyRules;
-    if(s.repairEstimates)repairEstimates=s.repairEstimates;
-    if(s.estimateApprovals)estimateApprovals=s.estimateApprovals;
-    if(Array.isArray(s.financeRecords))financeRecords=s.financeRecords;
-    if(Array.isArray(s.invoiceRecords))invoiceRecords=s.invoiceRecords;
-    if(s.projectCostBreakdowns)projectCostBreakdowns=s.projectCostBreakdowns;
-    if(s.staffPayrollMaster)staffPayrollMaster=s.staffPayrollMaster;
-    if(s.invoiceReminderConfig)invoiceReminderConfig=s.invoiceReminderConfig;
-    if(Array.isArray(s.bankTransactions))bankTransactions=s.bankTransactions;
-    if(Array.isArray(s.expenseRecords))expenseRecords=s.expenseRecords;
-    if(Array.isArray(s.fixedCostRecords))fixedCostRecords=s.fixedCostRecords;
-    if(Number.isFinite(s.cashStartingBalance))cashStartingBalance=s.cashStartingBalance;
-    if(Number.isFinite(s.fixedCostBudgetMonthly))fixedCostBudgetMonthly=s.fixedCostBudgetMonthly;
-    if(Array.isArray(s.managementAlerts))managementAlerts=s.managementAlerts;
-    if(s.monthlyBudgets)monthlyBudgets=s.monthlyBudgets;
-    if(Array.isArray(s.workflowTasks))workflowTasks=s.workflowTasks;
-    if(s.workflowState)workflowState=s.workflowState;
-    if(s.workflowRules)workflowRules=s.workflowRules;
-    if(Array.isArray(s.workflowExceptions))workflowExceptions=s.workflowExceptions;
-    if(Array.isArray(s.workflowAutoActionHistory))workflowAutoActionHistory=s.workflowAutoActionHistory;
-    if(s.backupState)backupState=s.backupState;
-    if(Array.isArray(s.deletedRecoveryItems))deletedRecoveryItems=s.deletedRecoveryItems;
-    if(Array.isArray(s.serverAuditLogs))serverAuditLogs=s.serverAuditLogs;
-    if(Array.isArray(s.disasterBackups))disasterBackups=s.disasterBackups;
-    if(s.backupAutomationConfig)backupAutomationConfig=s.backupAutomationConfig;
-    if(s.securityState)securityState=s.securityState;
-    if(s.rolePermissions)rolePermissions=s.rolePermissions;
-    if(Array.isArray(s.securityEvents))securityEvents=s.securityEvents;
-    if(Array.isArray(s.deviceApprovals))deviceApprovals=s.deviceApprovals;
-    if(s.securityPolicy)securityPolicy=s.securityPolicy;
-    if(Array.isArray(s.offlineSyncQueue))offlineSyncQueue=s.offlineSyncQueue;
-    if(s.mobileSyncState)mobileSyncState=s.mobileSyncState;
-    if(Array.isArray(s.syncConflicts))syncConflicts=s.syncConflicts;
-    if(Array.isArray(s.lineAutomationRules))lineAutomationRules=s.lineAutomationRules;
-    if(Array.isArray(s.communicationHistory))communicationHistory=s.communicationHistory;
-    if(s.reconciliationRules)reconciliationRules=s.reconciliationRules;
-    if(Array.isArray(s.reconciliationHistory))reconciliationHistory=s.reconciliationHistory;
-    if(s.aiManagementState)aiManagementState=s.aiManagementState;
-    if(Array.isArray(s.kpiSnapshots))kpiSnapshots=s.kpiSnapshots;
-    if(Array.isArray(s.nextMonthActions))nextMonthActions=s.nextMonthActions;
-    if(s.aiManagementSchedule)aiManagementSchedule=s.aiManagementSchedule;
-    if(Array.isArray(s.subcontractors))subcontractors=s.subcontractors;
-    if(Array.isArray(s.subcontractOrders))subcontractOrders=s.subcontractOrders;
-    if(s.accountingMappings)accountingMappings=s.accountingMappings;
-    if(Array.isArray(s.journalEntries))journalEntries=s.journalEntries;
-    if(s.portalAdminState)portalAdminState=s.portalAdminState;
-    if(Array.isArray(s.preReleaseTestResults))preReleaseTestResults=s.preReleaseTestResults;
-    if(s.deploymentState)deploymentState=s.deploymentState;
-    if(s.releaseChecklistState)releaseChecklistState=s.releaseChecklistState;
-    if(Array.isArray(s.releaseDiagnostics))releaseDiagnostics=s.releaseDiagnostics;
-    if(Array.isArray(s.regressionResults))regressionResults=s.regressionResults;
-    if(s.releaseCandidate)releaseCandidate=s.releaseCandidate;
-    if(s.geocodeCache)geocodeCache=s.geocodeCache;
-    if(s.currentStaffLocation)currentStaffLocation=s.currentStaffLocation;
-    if(Array.isArray(s.delayNotificationHistory))delayNotificationHistory=s.delayNotificationHistory;
-    if(s.staffLocations)staffLocations=s.staffLocations;
-    if(s.delayAutomationConfig)delayAutomationConfig=s.delayAutomationConfig;
-    if(Array.isArray(s.customerTrackingLinks))customerTrackingLinks=s.customerTrackingLinks;
-    if(s.trackingPrivacyConfig)trackingPrivacyConfig=s.trackingPrivacyConfig;
-    if(Array.isArray(s.arrivalNoticeHistory))arrivalNoticeHistory=s.arrivalNoticeHistory;
-    if(s.coreSyncState)coreSyncState=s.coreSyncState;
-    if(Array.isArray(s.cloudFiles))cloudFiles=s.cloudFiles;
-    if(s.extendedSyncState)extendedSyncState=s.extendedSyncState;
-    if(Array.isArray(s.documentIssueHistory))documentIssueHistory=s.documentIssueHistory;
-    if(Array.isArray(s.documentDeliveryHistory))documentDeliveryHistory=s.documentDeliveryHistory;
-    if(Array.isArray(s.customerPortals))customerPortals=s.customerPortals;
-    if(Array.isArray(s.portalRequests))portalRequests=s.portalRequests;
-    if(Array.isArray(s.portalNotices))portalNotices=s.portalNotices;
-    if(Array.isArray(s.portalPhotos))portalPhotos=s.portalPhotos;
+    applyLoadedState(s);
+    if(s?._storageMeta?.usesIndexedDb)hydrateLargeStateFromIndexedDb();
     return true;
   }catch(e){
     console.warn("loadState failed",e);
@@ -3252,7 +3413,8 @@ function loadState(){
 function resetAceData(){
   if(!confirm("ACEの保存データを初期化しますか？"))return;
   localStorage.removeItem(STORAGE_KEY);
-  location.reload();
+  localStorage.removeItem(STORAGE_META_KEY);
+  clearFullStateFromIndexedDb().finally(()=>location.reload());
 }
 function exportAceData(){
   const state={
@@ -3269,11 +3431,13 @@ function exportAceData(){
 function importAceData(ev){
   const file=ev.target.files[0]; if(!file)return;
   const r=new FileReader();
-  r.onload=()=>{
+  r.onload=async ()=>{
     try{
       const s=JSON.parse(r.result);
       if(!Array.isArray(s.customers)||!Array.isArray(s.projects))throw new Error("invalid");
-      localStorage.setItem(STORAGE_KEY,JSON.stringify(s));
+      applyLoadedState(s);
+      const savePromise=saveState();
+      await savePromise;
       alert("バックアップを読み込みました。再読み込みします。");
       location.reload();
     }catch(e){alert("ACEバックアップとして読み込めませんでした。")}
@@ -13597,9 +13761,12 @@ window.addEventListener("online",()=>{setSyncStatus(true,"オンライン復帰"
 window.addEventListener("offline",()=>{setSyncStatus(false,"オフライン");});
 registerServiceWorker();setTimeout(updatePushStatus,800);
 
-loadState();restoreApiConfig();restoreAuth();
-renderDashboard();updateNotifyCount();renderExecutiveDashboard();setTimeout(maybeGenerateScheduledAiComment,0);renderWorkflowDashboard();renderFinanceDashboard();pullEstimateApprovals();renderFieldwork();renderProcurementOverview();renderToolManagement();pullPortalRequests();renderSyncPage();setupCoreAutoSync();renderWorkforce();renderGeoStatus();renderRouteMap();renderStaffLocations();syncDelayAutomationInputs();setupEtaRefresh();loadGoogleMapsFrontendKey();renderLocationSharingStatus();syncTrackingPrivacyInputs();pullSharedLocations();renderPublicTrackingPage();renderBookingCalendar();renderSlaReport();refreshGoogleCalendarStatus();renderCampaignPerformance();renderLineScenarios();renderLineCrm();renderInventory();renderScrapInventory();calculateCircularKpis();renderPurchaseOrderHistory();renderMasters();renderMonthlyPnL();renderStaffReports();renderNotificationRules();renderAutoNotificationQueue();renderCustomers();renderProjects();renderBookings();renderMemberships();fillLine();lineDraft();updatePhotoKpi();updateMembershipKpis();
-saveState();
+async function bootstrapApp(){
+ loadState();restoreApiConfig();restoreAuth();
+ renderDashboard();updateNotifyCount();renderExecutiveDashboard();setTimeout(maybeGenerateScheduledAiComment,0);renderWorkflowDashboard();renderFinanceDashboard();pullEstimateApprovals();renderFieldwork();renderProcurementOverview();renderToolManagement();pullPortalRequests();renderSyncPage();setupCoreAutoSync();renderWorkforce();renderGeoStatus();renderRouteMap();renderStaffLocations();syncDelayAutomationInputs();setupEtaRefresh();loadGoogleMapsFrontendKey();renderLocationSharingStatus();syncTrackingPrivacyInputs();pullSharedLocations();renderPublicTrackingPage();renderBookingCalendar();renderSlaReport();refreshGoogleCalendarStatus();renderCampaignPerformance();renderLineScenarios();renderLineCrm();renderInventory();renderScrapInventory();calculateCircularKpis();renderPurchaseOrderHistory();renderMasters();renderMonthlyPnL();renderStaffReports();renderNotificationRules();renderAutoNotificationQueue();renderCustomers();renderProjects();renderBookings();renderMemberships();fillLine();lineDraft();updatePhotoKpi();updateMembershipKpis();
+ await saveState();
+}
+bootstrapApp().catch(e=>console.error("bootstrapApp failed",e));
 </script>
 
 <div class="sync-panel hidden" id="syncPanel">
