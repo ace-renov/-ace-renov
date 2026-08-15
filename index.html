@@ -3215,11 +3215,11 @@ function isStorageQuotaError(err){
   return name==="QuotaExceededError"||name==="NS_ERROR_DOM_QUOTA_REACHED"||/quota|capacity|容量|storage/i.test(msg);
 }
 async function persistState(state,token){
-  const compact=compactStateForLocalStorage(state);
   try{
     const summary=statePayloadSummary(state);
     await writeFullStateToIndexedDb(state);
     if(token!==saveStateToken)return;
+    const compact=compactStateForLocalStorage(state);
     localStorage.setItem(STORAGE_KEY,JSON.stringify(compact));
     localStorage.setItem(STORAGE_META_KEY,JSON.stringify({
       savedAt:new Date().toISOString(),
@@ -13766,7 +13766,7 @@ async function bootstrapApp(){
  renderDashboard();updateNotifyCount();renderExecutiveDashboard();setTimeout(maybeGenerateScheduledAiComment,0);renderWorkflowDashboard();renderFinanceDashboard();pullEstimateApprovals();renderFieldwork();renderProcurementOverview();renderToolManagement();pullPortalRequests();renderSyncPage();setupCoreAutoSync();renderWorkforce();renderGeoStatus();renderRouteMap();renderStaffLocations();syncDelayAutomationInputs();setupEtaRefresh();loadGoogleMapsFrontendKey();renderLocationSharingStatus();syncTrackingPrivacyInputs();pullSharedLocations();renderPublicTrackingPage();renderBookingCalendar();renderSlaReport();refreshGoogleCalendarStatus();renderCampaignPerformance();renderLineScenarios();renderLineCrm();renderInventory();renderScrapInventory();calculateCircularKpis();renderPurchaseOrderHistory();renderMasters();renderMonthlyPnL();renderStaffReports();renderNotificationRules();renderAutoNotificationQueue();renderCustomers();renderProjects();renderBookings();renderMemberships();fillLine();lineDraft();updatePhotoKpi();updateMembershipKpis();
  await saveState();
 }
-bootstrapApp();
+bootstrapApp().catch(e=>console.error("bootstrapApp failed",e));
 </script>
 
 <div class="sync-panel hidden" id="syncPanel">
