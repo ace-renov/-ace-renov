@@ -3712,7 +3712,7 @@ def upload_photo():
 def uploaded(filename):return send_from_directory(UPLOAD_DIR,filename)
 
 with app.app_context():
-   _initialize_production_once()
+    _initialize_production_once()
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.getenv("PORT","8000")),debug=False)
